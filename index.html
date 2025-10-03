@@ -1,0 +1,374 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Warisan KL Urban Analytics</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <script src='https://unpkg.com/maplibre-gl@3.6.2/dist/maplibre-gl.js'></script>
+  <link href='https://unpkg.com/maplibre-gl@3.6.2/dist/maplibre-gl.css' rel='stylesheet' />
+  <script src="https://unpkg.com/shpjs@latest/dist/shp.js"></script>
+  <script src="https://unpkg.com/@turf/turf@6/turf.min.js"></script>
+  <style>
+    body { margin:0; padding:0; background:#1a1a1a; }
+    .banner-container {
+      width: 100%;
+      height: 80vh;
+      min-height: 600px;
+      position: relative;
+      overflow: hidden;
+      background: linear-gradient(135deg, rgba(15,93,244,1) 19%, rgba(33,200,117,1) 89%);
+    }
+    #map { position:absolute; top:0; bottom:0; width:100%; height:100%; }
+    .content-overlay {
+      position: absolute;
+      top: 75%;
+      left: 50px;
+      transform: translateY(-50%);
+      color: white;
+      z-index: 10;
+      pointer-events: none;
+    }
+    .title {
+      font-size: 4em;
+      font-weight: bold;
+      margin-bottom: 15px;
+      text-shadow: 3px 3px 8px rgba(0,0,0,0.7), 1px 1px 3px rgba(0,0,0,0.9);
+      font-family: Arial, sans-serif;
+    }
+    .subtitle {
+      font-size: 1.5em;
+      opacity: 0.9;
+      text-shadow: 2px 2px 6px rgba(0,0,0,0.7), 1px 1px 3px rgba(0,0,0,0.9);
+      font-family: Arial, sans-serif;
+    }
+    .legend {
+      position: absolute;
+      bottom: 16px;
+      right: 16px;
+      z-index: 999;
+      background: rgba(255,255,255,0.95);
+      padding: 12px;
+      border-radius: 6px;
+      font-size:13px;
+      color:#111;
+      box-shadow: 0 4px 12px rgba(0,0,0,0.4);
+      max-width:280px;
+    }
+    .legend h4 { margin:0 0 8px 0; font-size:15px; font-weight:600; }
+    .legend .section-title { font-weight:600; margin-top:10px; margin-bottom:4px; font-size:12px; color:#555; }
+    .legend .row { display:flex; align-items:center; margin:4px 0; }
+    .legend .swatch { width:16px; height:16px; margin-right:8px; border:1px solid #999; flex-shrink:0; }
+    @media (max-width: 768px) {
+      .banner-container { height: 50vh; min-height: 400px; }
+      .content-overlay { left: 30px; top: 80%; }
+      .title { font-size: 2.5em; }
+      .subtitle { font-size: 1.2em; }
+    }
+  </style>
+</head>
+<body>
+<div class="banner-container">
+  <div id="map"></div>
+  <div class="content-overlay">
+    <div class="title" id="mainTitle">Urban Analytics</div>
+    <div class="subtitle" id="mainSubtitle">From Understanding Data to Developing Insights</div>
+  </div>
+  <div class="legend" id="legend"></div>
+</div>
+
+<script>
+// ===== CONFIGURATION SECTION - EDIT THESE =====
+
+const CONFIG = {
+  // Main title and subtitle
+  mainTitle: "Urban Analytics",
+  mainSubtitle: "From Understanding Data to Developing Insights",
+  
+  // Legend titles
+  legendTitle: "Legend",
+  buildingClassTitle: "Main Entity of the Building",
+  blockHighlightTitle: "Precinct",
+  
+  // Building category labels (maps main_entit values to display labels)
+  categoryLabels: {
+    "Government": "Government",
+    "Business": "Business",
+    "Residential": "Residence",
+    "Community & Religious": "Community & Religious",
+    "Educational": "Education",
+    "Hotel": "Hotel",
+    "Vacant": "Vacant",
+    "Unknown": "Unknown"
+  },
+  
+  // Distinct color palette for building categories
+  categoryColors: [
+    '#E41A1C', // Red
+    '#377EB8', // Blue
+    '#4DAF4A', // Green
+    '#984EA3', // Purple
+    '#FF7F00', // Orange
+    '#FFFF33', // Yellow
+    '#A65628', // Brown
+    '#9F2B68'  // Pink
+  ],
+  
+  // Block/Precinct labels (maps Block ID to display name)
+  precinctLabels: {
+    "1": "Heritage Triangle",
+    "2": "Civic",
+    "3": "Petaling Street",
+    "4": "Education",
+    "5": "Traditional Shopping Street"
+  },
+  
+  // Stronger, more distinct block highlight colors
+  blockColors: {
+    "1": '#E74C3C', // Bright Red
+    "2": '#3498DB', // Bright Blue
+    "3": '#2ECC71', // Bright Green
+    "4": '#9B59B6', // Purple
+    "5": '#F39C12'  // Orange
+  }
+};
+
+// ===== END CONFIGURATION =====
+
+const PRECINCT_ZIP_URL = 'https://raw.githubusercontent.com/yanchenggis/color_bldg_banner/main/precinct.zip';
+const BUILDING_ZIP_URL = 'https://raw.githubusercontent.com/yanchenggis/color_bldg_banner/main/KLCCD_core_building_processed.zip';
+
+let precincts=null, buildings=null, entitCategories=[], entitColors={}, entitMatchExpression=null, blockToFeatureIndices={};
+
+const map = new maplibregl.Map({
+  container:'map',
+  style:'https://tiles.openfreemap.org/styles/dark',
+  center:[103.05,3.14],
+  zoom:15,
+  pitch:55,
+  bearing:0,
+  maxBounds:[[101.680,3.135],[101.715,3.165]]
+});
+
+map.on('load', async ()=>{
+  document.getElementById('mainTitle').textContent = CONFIG.mainTitle;
+  document.getElementById('mainSubtitle').textContent = CONFIG.mainSubtitle;
+  
+  await waitForIdle();
+
+  // OSM background grey buildings
+  map.addLayer({
+    id:'osm-3d-base',
+    type:'fill-extrusion',
+    source:'openmaptiles',
+    'source-layer':'building',
+    paint:{
+      'fill-extrusion-color':'#555555',
+      'fill-extrusion-height':['get','render_height'],
+      'fill-extrusion-base':['get','render_min_height'],
+      'fill-extrusion-opacity':0.4
+    }
+  });
+
+  // Load precincts
+  precincts=await loadShapefileAsGeoJSON(PRECINCT_ZIP_URL);
+  precincts.features.forEach((f,i)=>{
+    const blockId = f.properties.Block || String(i);
+    f.properties.Block = blockId;
+    f.properties._color = CONFIG.blockColors[blockId] || '#CCCCCC';
+  });
+
+  // Load buildings
+  buildings=await loadShapefileAsGeoJSON(BUILDING_ZIP_URL);
+  buildings.features.forEach((f,i)=>{
+    if(!('main_entit' in f.properties)) f.properties.main_entit='Unknown';
+    f.properties.__index=i;
+    f.properties.inBlock=true;
+  });
+
+  entitCategories=Array.from(new Set(buildings.features.map(f=>f.properties.main_entit||'Unknown')));
+  entitColors=assignColorsFromCategories(entitCategories,CONFIG.categoryColors);
+  entitMatchExpression=buildMatchExpression(entitCategories,entitColors);
+
+  const osmFeatures=map.querySourceFeatures('openmaptiles',{sourceLayer:'building'})||[];
+  joinHeightsClientSideExpanded(buildings,osmFeatures);
+
+  buildBlockToFeaturesIndex(precincts,buildings);
+
+  addPrecinctLayer();
+  addEntitLayer();
+
+  setupHoverHandlers();
+  buildLegend();
+  
+  // Add slow auto-rotation effect
+  let bearing = 0;
+  setInterval(() => {
+    bearing = (bearing + 0.1) % 360;
+    map.setBearing(bearing);
+  }, 100);
+});
+
+function waitForIdle(){
+  return new Promise(res=>{
+    if(map.loaded()&&map.isStyleLoaded()) map.once('idle',()=>res());
+    else map.once('load',()=>map.once('idle',()=>res()));
+  });
+}
+
+async function loadShapefileAsGeoJSON(url){
+  const r=await fetch(url); const arr=await r.arrayBuffer(); const geo=await shp(arr);
+  if(geo.type==='FeatureCollection') return geo;
+  for(const k of Object.keys(geo)){ if(geo[k].type==='FeatureCollection') return geo[k]; }
+  throw new Error('Bad shapefile '+url);
+}
+
+function assignColorsFromCategories(categories,palette){
+  const map={}; categories.forEach((c,i)=>map[c]=palette[i%palette.length]); return map;
+}
+
+function buildMatchExpression(categories,colorMap){
+  const expr=['match',['get','main_entit']];
+  for(const c of categories){ expr.push(c,colorMap[c]); }
+  expr.push('#CFCFCF');
+  return expr;
+}
+
+function joinHeightsClientSideExpanded(buildingsGeo,osmFeatures){
+  const osmIndex=osmFeatures.map(f=>({bbox:turf.bbox(f.geometry),feature:f}));
+  
+  for(const b of buildingsGeo.features){
+    let maxHeight=15; 
+    const bb=turf.bbox(b.geometry);
+    const expandedBB=[bb[0]-0.0001,bb[1]-0.0001,bb[2]+0.0001,bb[3]+0.0001];
+    
+    const matchingHeights=[];
+    for(const item of osmIndex){
+      if(item.bbox[0]>expandedBB[2]||item.bbox[2]<expandedBB[0]||
+         item.bbox[1]>expandedBB[3]||item.bbox[3]<expandedBB[1]) continue;
+      try{ 
+        if(turf.booleanIntersects(b.geometry,item.feature.geometry)||
+           turf.booleanContains(b.geometry,item.feature.geometry)||
+           turf.booleanWithin(b.geometry,item.feature.geometry)){
+          const h=item.feature.properties&&item.feature.properties.render_height;
+          if(h&&!isNaN(Number(h))) matchingHeights.push(Number(h));
+        }
+      }catch{}
+    }
+    
+    if(matchingHeights.length>0) maxHeight=Math.max(...matchingHeights);
+    b.properties._height=maxHeight;
+  }
+}
+
+function buildBlockToFeaturesIndex(precinctsGeo,buildingsGeo){
+  blockToFeatureIndices={}; 
+  const bboxes=buildingsGeo.features.map(f=>turf.bbox(f.geometry));
+  
+  for(const block of precinctsGeo.features){
+    const blockId=block.properties.Block; 
+    blockToFeatureIndices[blockId]=[];
+    const bb=turf.bbox(block.geometry);
+    
+    for(let i=0;i<buildingsGeo.features.length;i++){
+      const b=bboxes[i]; 
+      if(b[0]>bb[2]||b[2]<bb[0]||b[1]>bb[3]||b[3]<bb[1]) continue;
+      try{ 
+        if(turf.booleanIntersects(block.geometry,buildingsGeo.features[i].geometry)) {
+          blockToFeatureIndices[blockId].push(i);
+        }
+      }catch{}
+    }
+  }
+}
+
+function addPrecinctLayer(){
+  map.addSource('precincts',{type:'geojson',data:precincts});
+  map.addLayer({
+    id:'precinct-hover-hit',
+    type:'fill',
+    source:'precincts',
+    paint:{'fill-color':'#000','fill-opacity':0}
+  },'osm-3d-base');
+  map.addLayer({
+    id:'precinct-highlight',
+    type:'fill',
+    source:'precincts',
+    paint:{'fill-color':['get','_color'],'fill-opacity':0.3},
+    filter:['==',['get','Block'],'__none__']
+  },'osm-3d-base');
+  map.addLayer({
+    id:'precinct-outline',
+    type:'line',
+    source:'precincts',
+    paint:{'line-color':'#fff','line-width':2,'line-opacity':0.7}
+  },'osm-3d-base');
+}
+
+function addEntitLayer(){
+  map.addSource('entit-buildings',{type:'geojson',data:buildings});
+  map.addLayer({
+    id:'entit-buildings-3d',
+    type:'fill-extrusion',
+    source:'entit-buildings',
+    paint:{
+      'fill-extrusion-color':[
+        'case',
+        ['==',['get','inBlock'],true],
+        entitMatchExpression,
+        '#d0d0d0'
+      ],
+      'fill-extrusion-height':['get','_height'],
+      'fill-extrusion-base':0,
+      'fill-extrusion-opacity':1.0
+    }
+  });
+}
+
+function setupHoverHandlers(){
+  map.on('mousemove','precinct-hover-hit',(e)=>{
+    if(!e.features||!e.features.length)return;
+    const block=e.features[0].properties.Block;
+    map.setFilter('precinct-highlight',['==',['get','Block'],block]);
+    
+    const indicesIn=new Set(blockToFeatureIndices[block]||[]);
+    for(let i=0;i<buildings.features.length;i++){
+      buildings.features[i].properties.inBlock=indicesIn.has(i);
+    }
+    map.getSource('entit-buildings').setData(buildings);
+  });
+  
+  map.on('mouseleave','precinct-hover-hit',()=>{
+    map.setFilter('precinct-highlight',['==',['get','Block'],'__none__']);
+    for(const f of buildings.features) f.properties.inBlock=true;
+    map.getSource('entit-buildings').setData(buildings);
+  });
+}
+
+function buildLegend(){
+  const legend=document.getElementById('legend');
+  let html=`<h4>${CONFIG.legendTitle}</h4>`;
+  
+  html+=`<div class="section-title">${CONFIG.buildingClassTitle}</div>`;
+  for(const [k,v] of Object.entries(entitColors)){
+    const label=CONFIG.categoryLabels[k]||k;
+    html+=`<div class="row"><div class="swatch" style="background:${v}"></div><div>${label}</div></div>`;
+  }
+  
+  html+=`<div class="section-title">${CONFIG.blockHighlightTitle}</div>`;
+  
+  // Sort precincts by Block ID (1,2,3,4,5)
+  const sortedPrecincts = precincts.features.sort((a,b)=> 
+    parseInt(a.properties.Block) - parseInt(b.properties.Block)
+  );
+  
+  for(const f of sortedPrecincts){
+    const blockId = f.properties.Block;
+    const label = CONFIG.precinctLabels[blockId] || `Block ${blockId}`;
+    html+=`<div class="row"><div class="swatch" style="background:${f.properties._color}"></div><div>${label}</div></div>`;
+  }
+  
+  legend.innerHTML=html;
+}
+</script>
+</body>
+</html>
